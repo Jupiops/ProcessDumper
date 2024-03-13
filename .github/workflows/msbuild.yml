@@ -1,0 +1,59 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: MSBuild
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  # Path to the solution file relative to the root of the project.
+  SOLUTION_FILE_PATH: .
+
+  # Configuration type to build.
+  # You can convert this to a build matrix if you need coverage of multiple configuration types.
+  # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+  BUILD_CONFIGURATION: Release
+  PLATFORM: x64
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+        
+    - name: Build
+      working-directory: ${{env.GITHUB_WORKSPACE}}
+      # Add additional options to the MSBuild command line here (like platform or verbosity level).
+      # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
+      run: msbuild /m /p:Platform=${{env.PLATFORM}} /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}}
+
+    # New step to rename the files
+    - name: Rename files
+      run: |
+        Move-Item D:/a/DecryptionDumper/DecryptionDumper/x64/Release/DecryptionDumper.exe D:/a/DecryptionDumper/DecryptionDumper/x64/Release/Decryptor.exe
+        Move-Item D:/a/DecryptionDumper/DecryptionDumper/x64/Release/DecryptionDumper.pdb D:/a/DecryptionDumper/DecryptionDumper/x64/Release/Decryptor.pdb
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Decryptor
+        path: D:/a/DecryptionDumper/DecryptionDumper/x64/Release/*
+        compression-level: 9
