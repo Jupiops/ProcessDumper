@@ -8,6 +8,14 @@
 #include <vector>
 #include <Windows.h>
 
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS 0x00000000
+#endif
+
+#ifndef STATUS_PARTIAL_COPY
+#define STATUS_PARTIAL_COPY ((NTSTATUS)0x8000000D)
+#endif
+
 SOCKET Socket1;
 SOCKET Socket2;
 SOCKET Socket3;
@@ -221,10 +229,21 @@ int main()
         std::cout << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024 * 1024) << make_string(" GB") << std::endl;
         Sleep(1000);
 
-        std::vector<char> buffer(ntHeaders.OptionalHeader.SizeOfImage);
-        if (!Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(buffer.data()), ntHeaders.OptionalHeader.SizeOfImage))
+        std::vector<UINT8> buffer(ntHeaders.OptionalHeader.SizeOfImage);
+        UINT64 statusValue = Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(buffer.data()), ntHeaders.OptionalHeader.SizeOfImage);
+        NTSTATUS status = static_cast<NTSTATUS>(statusValue); // Cast UINT64 back to NTSTATUS
+
+        if (status == STATUS_SUCCESS)
         {
-			std::cout << make_string("Failed to read memory") << std::endl;
+			std::cout << make_string("Read memory successfully") << std::endl;
+		}
+        else if (status == STATUS_PARTIAL_COPY)
+        {
+			std::cout << make_string("Partial copy") << std::endl;
+		}
+        else
+        {
+			std::cout << make_string("Failed to read memory, status: ") << std::hex << status << std::dec << std::endl;
 			Sleep(4000);
 			continue;
 		}
@@ -249,10 +268,12 @@ int main()
         Sleep(1000);
 
         PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
-        for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++)
+        for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++, pSectionHeader++)
         {
 			std::cout << make_string("Section ") << i << make_string(" Name: ") << pSectionHeader->Name << make_string("  Virtual Address: ") << std::hex << pSectionHeader->VirtualAddress << std::dec << make_string("  Size: ") << pSectionHeader->Misc.VirtualSize << make_string("  Raw Size: ") << pSectionHeader->SizeOfRawData << std::endl;
-			pSectionHeader++;
+			pSectionHeader->SizeOfRawData = pSectionHeader->Misc.VirtualSize;
+            pSectionHeader->PointerToRawData = pSectionHeader->VirtualAddress;
+            std::cout << make_string("Fixed Section ") << i << make_string(" Name: ") << pSectionHeader->Name << make_string("  Virtual Address: ") << std::hex << pSectionHeader->VirtualAddress << std::dec << make_string("  Size: ") << pSectionHeader->Misc.VirtualSize << make_string("  Raw Size: ") << pSectionHeader->SizeOfRawData << std::endl;
 		}
 
         // Create and write the dump file
@@ -266,7 +287,7 @@ int main()
 
         std::clog << make_string("Starting memory dump of process ") << ProcessId << make_string(" to ") << outputPath << std::endl;
 
-        outputFile.write(buffer.data(), ntHeaders.OptionalHeader.SizeOfImage);
+        outputFile.write(reinterpret_cast<const char*>(buffer.data()), ntHeaders.OptionalHeader.SizeOfImage);
 
         std::clog << make_string("Memory dump completed successfully.") << std::endl;
         outputFile.close();
