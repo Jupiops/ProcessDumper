@@ -23,26 +23,34 @@ UINT32 ProcessId = 0;
 UINT64 BaseAddress = 0;
 UINT64 PebAddress = 0;
 
-bool IsProcessRunningStealth(const wchar_t* processName) {
+bool IsProcessRunningStealth(const wchar_t* processName)
+{
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+    {
         return false; // Error handling or stealth abort
     }
 
     PROCESSENTRY32W pe32; // Note the 'W' at the end for Unicode
     pe32.dwSize = sizeof(PROCESSENTRY32W);
 
-    if (!Process32FirstW(hSnapshot, &pe32)) { // Note the 'W' for Unicode version
+    if (!Process32FirstW(hSnapshot, &pe32))
+    {
+        // Note the 'W' for Unicode version
         CloseHandle(hSnapshot);
         return false; // Error handling or stealth abort
     }
 
-    do {
-        if (wcscmp(pe32.szExeFile, processName) == 0) { // Using wcscmp for wide char comparison
+    do
+    {
+        if (wcscmp(pe32.szExeFile, processName) == 0)
+        {
+            // Using wcscmp for wide char comparison
             CloseHandle(hSnapshot);
             return true; // Found the process
         }
-    } while (Process32NextW(hSnapshot, &pe32)); // Note the 'W' for Unicode version
+    }
+    while (Process32NextW(hSnapshot, &pe32)); // Note the 'W' for Unicode version
 
     CloseHandle(hSnapshot);
     return false; // Process not found
@@ -56,7 +64,7 @@ BOOLEAN WaitForAndUpdateProcessId()
         auto enc = make_string("cod.exe");
         auto processName = std::wstring(enc.begin(), enc.end());
         RtlSecureZeroMemory(&enc[0], enc.size());
-        ProcessId = UINT32(Driver::GetProcessId(Socket1, processName));
+        ProcessId = UINT32(Driver::GetProcessId(Socket1, processName).value);
         RtlSecureZeroMemory(&processName[0], processName.size() * sizeof(wchar_t));
         if (ProcessId == 0)
         {
@@ -74,7 +82,7 @@ BOOLEAN UpdateBaseAddress()
     {
         return FALSE;
     }
-    BaseAddress = Driver::GetBaseAddress(Socket1, ProcessId);
+    BaseAddress = Driver::GetBaseAddress(Socket1, ProcessId).value;
     if (BaseAddress == 0)
     {
         ProcessId = 0;
@@ -88,7 +96,7 @@ BOOLEAN UpdateProcessEnvironmentBlockAddress()
     {
         return FALSE;
     }
-    PebAddress = Driver::GetPEBAddress(Socket1, ProcessId);
+    PebAddress = Driver::GetPebAddress(Socket1, ProcessId).value;
     return PebAddress != 0;
 }
 
@@ -109,7 +117,7 @@ int main()
 
 
     // Set window title
-    std::string title = make_string("Decryptor");
+    auto title = make_string("Decryptor");
     std::wstring wtitle(title.begin(), title.end());
     RtlSecureZeroMemory(&title[0], title.size());
     SetWindowText(GetConsoleWindow(), wtitle.c_str());
@@ -169,12 +177,14 @@ int main()
 
     ProcessId = 0;
 
-    while (true) {
+    while (true)
+    {
         std::string input;
         std::cout << make_string("Press Enter to dump or 'q' to quit: ");
         std::getline(std::cin, input);
 
-        if (!input.empty() && input[0] == 'q') {
+        if (!input.empty() && input[0] == 'q')
+        {
             break; // Exit the loop if the user enters 'q'
         }
 
@@ -205,16 +215,16 @@ int main()
         std::cout << make_string("PEB address found at: ") << std::hex << PebAddress << std::dec << std::endl;
         Sleep(1000);
 
-        IMAGE_DOS_HEADER dosHeader = Driver::Read<IMAGE_DOS_HEADER>(Socket1, ProcessId, BaseAddress);
+        auto dosHeader = Driver::Read<IMAGE_DOS_HEADER>(Socket1, ProcessId, BaseAddress);
 
         if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE)
         {
-			std::cout << make_string("Invalid DOS header") << std::endl;
-			Sleep(4000);
+            std::cout << make_string("Invalid DOS header") << std::endl;
+            Sleep(4000);
             continue;
-		}
+        }
 
-        IMAGE_NT_HEADERS64 ntHeaders = Driver::Read<IMAGE_NT_HEADERS64>(Socket1, ProcessId, BaseAddress + dosHeader.e_lfanew);
+        auto ntHeaders = Driver::Read<IMAGE_NT_HEADERS64>(Socket1, ProcessId, BaseAddress + dosHeader.e_lfanew);
 
         if (ntHeaders.Signature != IMAGE_NT_SIGNATURE)
         {
@@ -223,40 +233,48 @@ int main()
             continue;
         }
 
-        std::cout << make_string("Fetched DOS and NT headers, size of image: ") << ntHeaders.OptionalHeader.SizeOfImage << make_string(" bytes");
-        std::cout << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024) << make_string(" KB");
-        std::cout << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024) << make_string(" MB");
-        std::cout << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024 * 1024) << make_string(" GB") << std::endl;
+        std::cout << make_string("Fetched DOS and NT headers, size of image: ") << ntHeaders.OptionalHeader.SizeOfImage << make_string(" bytes")
+        << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024) << make_string(" KB")
+        << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024) << make_string(" MB")
+        << make_string("  = ") << std::dec << ntHeaders.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024 * 1024) << make_string(" GB") << std::endl;
+
+        SIZE_T headerSize = dosHeader.e_lfanew + sizeof(IMAGE_NT_HEADERS64) + (ntHeaders.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
+
+        std::cout << make_string("Header size: ") << std::dec << headerSize << make_string(" bytes") <<
+            make_string("  = ") << std::dec << headerSize / static_cast<float>(1024) << make_string(" KB") <<
+            make_string("  = ") << std::dec << headerSize / static_cast<float>(1024 * 1024) << make_string(" MB") <<
+            std::endl;
+
+        std::vector<UINT8> headerBuffer(headerSize);
         Sleep(1000);
 
-        std::vector<UINT8> buffer(ntHeaders.OptionalHeader.SizeOfImage);
-        UINT64 statusValue = Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(buffer.data()), ntHeaders.OptionalHeader.SizeOfImage);
-        NTSTATUS status = static_cast<NTSTATUS>(statusValue); // Cast UINT64 back to NTSTATUS
 
-        if (status == STATUS_SUCCESS)
+        RESULT result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(headerBuffer.data()), headerSize);
+
+        if (result.status == STATUS_SUCCESS)
         {
-			std::cout << make_string("Read memory successfully") << std::endl;
-		}
-        else if (status == STATUS_PARTIAL_COPY)
+            std::cout << make_string("Read memory successfully") << std::endl;
+        }
+        else if (result.status == STATUS_PARTIAL_COPY)
         {
-			std::cout << make_string("Partial copy") << std::endl;
-		}
+            std::cout << make_string("Partial copy with size: ") << std::dec << result.value << make_string(" bytes") << std::endl;
+        }
         else
         {
-			std::cout << make_string("Failed to read memory, status: ") << std::hex << status << std::dec << std::endl;
-			Sleep(4000);
-			continue;
-		}
+            std::cout << make_string("Failed to read memory, status: ") << std::hex << result.status << std::dec << std::endl;
+            Sleep(4000);
+            continue;
+        }
 
-        PIMAGE_DOS_HEADER pDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(buffer.data());
+        auto pDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(headerBuffer.data());
         if (pDosHeader->e_magic != IMAGE_DOS_SIGNATURE)
         {
-			std::cout << make_string("Invalid PIMAGE_DOS_HEADER") << std::endl;
-			Sleep(4000);
+            std::cout << make_string("Invalid PIMAGE_DOS_HEADER") << std::endl;
+            Sleep(4000);
             continue;
-		}
+        }
 
-        PIMAGE_NT_HEADERS64 pNtHeaders = reinterpret_cast<PIMAGE_NT_HEADERS64>(buffer.data() + pDosHeader->e_lfanew);
+        auto pNtHeaders = reinterpret_cast<PIMAGE_NT_HEADERS64>(headerBuffer.data() + pDosHeader->e_lfanew);
         if (pNtHeaders->Signature != IMAGE_NT_SIGNATURE)
         {
             std::cout << make_string("Invalid PIMAGE_NT_HEADERS64") << std::endl;
@@ -267,30 +285,24 @@ int main()
         std::cout << make_string("Read PIMAGE_DOS_HEADER and PIMAGE_NT_HEADERS64 successfully") << std::endl;
         Sleep(1000);
 
-        PIMAGE_SECTION_HEADER pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
-        for (int i = 0; i < pNtHeaders->FileHeader.NumberOfSections; i++, pSectionHeader++)
+        auto pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+
+        for (int i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++, pSectionHeader++)
         {
-			std::cout << make_string("Section ") << i << make_string(" Name: ") << pSectionHeader->Name << make_string("  Virtual Address: ") << std::hex << pSectionHeader->VirtualAddress << std::dec << make_string("  Size: ") << pSectionHeader->Misc.VirtualSize << make_string("  Raw Size: ") << pSectionHeader->SizeOfRawData << std::endl;
-			pSectionHeader->SizeOfRawData = pSectionHeader->Misc.VirtualSize;
+            // Create a buffer for the section
+            std::vector<UINT8> sectionBuffer(pSectionHeader->Misc.VirtualSize);
+
+            // Read the section into the buffer
+            RESULT result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress + pSectionHeader->VirtualAddress, reinterpret_cast<UINT_PTR>(sectionBuffer.data()), pSectionHeader->Misc.VirtualSize);
+
+            if (result.status != STATUS_SUCCESS)
+            {
+                std::cout << make_string("Failed to read section ") << pSectionHeader->Name << make_string(", status: ") << std::hex << result.status << std::dec << make_string(", read size: ") << std::dec << result.value << make_string(" bytes") << make_string(", expected size: ") << std::dec << pSectionHeader->Misc.VirtualSize << make_string(" bytes") << std::endl;
+            }
+            
+            pSectionHeader->SizeOfRawData = pSectionHeader->Misc.VirtualSize;
             pSectionHeader->PointerToRawData = pSectionHeader->VirtualAddress;
-            std::cout << make_string("Fixed Section ") << i << make_string(" Name: ") << pSectionHeader->Name << make_string("  Virtual Address: ") << std::hex << pSectionHeader->VirtualAddress << std::dec << make_string("  Size: ") << pSectionHeader->Misc.VirtualSize << make_string("  Raw Size: ") << pSectionHeader->SizeOfRawData << std::endl;
-		}
-
-        // Create and write the dump file
-        std::string outputPath = make_string("decrypted.bin");
-
-        std::ofstream outputFile(outputPath, std::ios::out | std::ios::binary);
-        if (!outputFile.is_open()) {
-            std::cerr << make_string("Failed to open output file: ") << outputPath << std::endl;
-            continue;
         }
-
-        std::clog << make_string("Starting memory dump of process ") << ProcessId << make_string(" to ") << outputPath << std::endl;
-
-        outputFile.write(reinterpret_cast<const char*>(buffer.data()), ntHeaders.OptionalHeader.SizeOfImage);
-
-        std::clog << make_string("Memory dump completed successfully.") << std::endl;
-        outputFile.close();
     }
 
     std::cout << make_string("Exiting") << std::endl;

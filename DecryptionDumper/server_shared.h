@@ -10,8 +10,22 @@ enum class PacketType
 	packet_copy_memory,
 	packet_get_base_address,
 	packet_get_pid,
-	packet_get_peb,
-	packet_completed
+	packet_get_peb_address,
+	packet_completed,
+	packet_get_process_list,
+	packet_get_req_plist_buf_size
+};
+
+struct PacketGetReqPListBufSize
+{
+	uint32_t magic;
+};
+
+struct PacketGetProcessList
+{
+	uintptr_t buffer_address;
+	uint32_t buffer_size;
+	uint32_t process_id;
 };
 
 struct PacketCopyMemory
@@ -22,7 +36,7 @@ struct PacketCopyMemory
 	uint32_t source_process_id;
 	uintptr_t source_address;
 
-	uint32_t size; // size_t size;
+	size_t size;
 };
 
 struct PacketGetBaseAddress
@@ -33,22 +47,23 @@ struct PacketGetBaseAddress
 struct PacketGetPid
 {
 	size_t process_name_length;
-	wchar_t process_name[256];
+	wchar_t process_name[32];
 };
 
-struct PacketGetPeb
+struct PacketGetPebAddress
 {
 	uint32_t process_id;
 };
 
 struct PacketCompleted
 {
-	uint64_t result;
+	uint32_t status;
+	size_t value;
 };
 
 struct PacketHeader
 {
-	// uint32_t magic;
+	uint32_t magic;
 	PacketType type;
 };
 
@@ -60,7 +75,9 @@ struct Packet
 		PacketCopyMemory copy_memory;
 		PacketGetBaseAddress get_base_address;
 		PacketGetPid get_pid;
-		PacketGetPeb get_peb;
+		PacketGetPebAddress get_peb;
+		PacketGetProcessList get_process_list;
+		PacketGetReqPListBufSize get_req_plist_buf_size;
 		PacketCompleted completed;
 	} data;
 };

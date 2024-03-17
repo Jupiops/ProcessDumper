@@ -1,36 +1,35 @@
 #include "Driver.h"
 
-static BOOLEAN SendPacket(const SOCKET ConnectSocket, const Packet& packet, UINT64& response)
+static BOOLEAN SendPacket(const SOCKET connectSocket, const Packet& packet, PRESULT response)
 {
-    if (send(ConnectSocket, (const char*)&packet, sizeof(packet), 0) == SOCKET_ERROR)
+    if (send(connectSocket, (const char*)&packet, sizeof(packet), 0) == SOCKET_ERROR)
     {
         return FALSE;
     }
 
-    char recvbuf[sizeof(Packet)]; // Buffer large enough to hold the incoming packet
-    int iResult;
-    int recvbuflen = sizeof(Packet); // The expected length of the packet
+    char receiveBuffer[sizeof(Packet)]; // Buffer large enough to hold the incoming packet
+    constexpr int receiveBufLen = sizeof(Packet); // The expected length of the packet
 
-    iResult = recv(ConnectSocket, recvbuf, recvbuflen, 0);
+    int iResult = recv(connectSocket, receiveBuffer, receiveBufLen, 0);
     if (iResult != sizeof(Packet))
     {
         return FALSE;
     }
 
     // Assuming you've received the packet fully and correctly
-    auto receivedPacket = reinterpret_cast<Packet*>(recvbuf);
+    const auto receivedPacket = reinterpret_cast<Packet*>(receiveBuffer);
 
     // Check packet type
-    if (receivedPacket->header.type == PacketType::packet_completed)
+    if (receivedPacket->header.type == PacketType::packet_completed && receivedPacket->header.magic == packet_magic)
     {
-        response = receivedPacket->data.completed.result;
+        *response = RESULT(receivedPacket->data.completed.status, receivedPacket->data.completed.value);
         return TRUE;
     }
     return FALSE;
 }
 
-static UINT64 CopyMem(
-    const SOCKET ConnectSocket,
+static RESULT copy_memory(
+    const SOCKET connectSocket,
     const UINT32 source_process_id,
     const UINT_PTR source_address,
     const UINT32 destination_process_id,
@@ -45,10 +44,10 @@ static UINT64 CopyMem(
     packet.data.copy_memory.destination_address = destination_address;
     packet.data.copy_memory.size = size;
 
-    UINT64 response;
-    if (!SendPacket(ConnectSocket, packet, response))
+    RESULT response;
+    if (!SendPacket(connectSocket, packet, &response))
     {
-        response = 0;
+        response = RESULT(STATUS_UNSUCCESSFUL, 0);
     }
     RtlSecureZeroMemory(&packet, sizeof(packet));
 
@@ -62,17 +61,16 @@ namespace Driver
     BOOLEAN TestConnection()
     {
         WSADATA wsaData;
-        int iResult;
 
         // Initialize Winsock
-        iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+        int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
         if (iResult != 0)
         {
             return FALSE;
         }
 
-        const SOCKET ConnectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (ConnectSocket == INVALID_SOCKET)
+        const SOCKET connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (connectSocket == INVALID_SOCKET)
         {
             WSACleanup();
             return FALSE;
@@ -83,10 +81,10 @@ namespace Driver
         clientService.sin_addr.s_addr = htonl(server_ip); // Server IP
         clientService.sin_port = htons(server_port); // Server Port
 
-        iResult = connect(ConnectSocket, (SOCKADDR*)&clientService, sizeof(clientService));
+        iResult = connect(connectSocket, reinterpret_cast<SOCKADDR*>(&clientService), sizeof(clientService));
         if (iResult == SOCKET_ERROR)
         {
-            closesocket(ConnectSocket);
+            closesocket(connectSocket);
             WSACleanup();
             return FALSE;
         }
@@ -101,37 +99,37 @@ namespace Driver
         wcsncpy_s(packet.data.get_pid.process_name, processName.c_str(), processName.length() + 1);
         // Copy the process name into the struct
 
-        iResult = send(ConnectSocket, (const char*)&packet, sizeof(packet), 0);
+        iResult = send(connectSocket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0);
         if (iResult == SOCKET_ERROR)
         {
-            closesocket(ConnectSocket);
+            closesocket(connectSocket);
             WSACleanup();
             return FALSE;
         }
 
-        char recvbuf[sizeof(Packet)]; // Buffer large enough to hold the incoming packet
-        int recvbuflen = sizeof(Packet); // The expected length of the packet
+        char receiveBuffer[sizeof(Packet)]; // Buffer large enough to hold the incoming packet
+        constexpr int receiveBufLen = sizeof(Packet); // The expected length of the packet
 
-        iResult = recv(ConnectSocket, recvbuf, recvbuflen, 0);
+        iResult = recv(connectSocket, receiveBuffer, receiveBufLen, 0);
         if (iResult != sizeof(Packet))
         {
-            closesocket(ConnectSocket);
+            closesocket(connectSocket);
             WSACleanup();
             return FALSE;
         }
 
         // Assuming you've received the packet fully and correctly
-        auto receivedPacket = reinterpret_cast<Packet*>(recvbuf);
+        const auto receivedPacket = reinterpret_cast<Packet*>(receiveBuffer);
 
         // Check if the packet type is correct
         if (receivedPacket->header.type != PacketType::packet_completed)
         {
-            closesocket(ConnectSocket);
+            closesocket(connectSocket);
             WSACleanup();
             return FALSE;
         }
 
-        closesocket(ConnectSocket);
+        closesocket(connectSocket);
         WSACleanup();
         return TRUE;
     }
@@ -149,8 +147,8 @@ namespace Driver
 
     SOCKET Connect()
     {
-        SOCKET ConnectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (ConnectSocket == INVALID_SOCKET)
+        const SOCKET connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (connectSocket == INVALID_SOCKET)
         {
             //WSACleanup();
             return INVALID_SOCKET;
@@ -161,19 +159,19 @@ namespace Driver
         clientService.sin_addr.s_addr = htonl(server_ip); // Server IP
         clientService.sin_port = htons(server_port); // Server Port
 
-        if (connect(ConnectSocket, (SOCKADDR*)&clientService, sizeof(clientService)) == SOCKET_ERROR)
+        if (connect(connectSocket, reinterpret_cast<SOCKADDR*>(&clientService), sizeof(clientService)) == SOCKET_ERROR)
         {
-            closesocket(ConnectSocket);
+            closesocket(connectSocket);
             //WSACleanup();
             return INVALID_SOCKET;
         }
 
-        return ConnectSocket;
+        return connectSocket;
     }
 
-    VOID Disconnect(SOCKET ConnectSocket)
+    VOID Disconnect(SOCKET connectSocket)
     {
-        closesocket(ConnectSocket);
+        closesocket(connectSocket);
         //WSACleanup();
     }
 
@@ -182,7 +180,7 @@ namespace Driver
         WSACleanup();
     }
 
-    UINT64 GetProcessId(SOCKET ConnectSocket, const std::wstring& processName)
+    RESULT GetProcessId(SOCKET connectSocket, const std::wstring& processName)
     {
         Packet packet;
         packet.header.type = PacketType::packet_get_pid;
@@ -190,52 +188,52 @@ namespace Driver
         wcsncpy_s(packet.data.get_pid.process_name, processName.c_str(), processName.length() + 1);
         // Copy the process name into the struct
 
-        UINT64 response;
-        if (!SendPacket(ConnectSocket, packet, response))
+        RESULT response;
+        if (!SendPacket(connectSocket, packet, &response))
         {
-            response = 0;
+            response = RESULT(STATUS_UNSUCCESSFUL, 0);
         }
         RtlSecureZeroMemory(&packet, sizeof(packet));
         return response;
     }
 
-    UINT64 GetBaseAddress(SOCKET ConnectSocket, UINT32 processId)
+    RESULT GetBaseAddress(SOCKET connectSocket, UINT32 processId)
     {
         Packet packet;
         packet.header.type = PacketType::packet_get_base_address;
         packet.data.get_base_address.process_id = processId;
 
-        UINT64 response;
-        if (!SendPacket(ConnectSocket, packet, response))
+        RESULT response;
+        if (!SendPacket(connectSocket, packet, &response))
         {
-            response = 0;
+            response = RESULT(STATUS_UNSUCCESSFUL, 0);
         }
         RtlSecureZeroMemory(&packet, sizeof(packet));
         return response;
     }
 
-    UINT64 GetPEBAddress(SOCKET ConnectSocket, UINT32 processId)
+    RESULT GetPebAddress(SOCKET connectSocket, UINT32 processId)
     {
         Packet packet;
-        packet.header.type = PacketType::packet_get_peb;
+        packet.header.type = PacketType::packet_get_peb_address;
         packet.data.get_peb.process_id = processId;
 
-        UINT64 response;
-        if (!SendPacket(ConnectSocket, packet, response))
+        RESULT response;
+        if (!SendPacket(connectSocket, packet, &response))
         {
-            response = 0;
+            response = RESULT(STATUS_UNSUCCESSFUL, 0);
         }
         RtlSecureZeroMemory(&packet, sizeof(packet));
         return response;
     }
 
-    UINT64 ReadMemory(
-        SOCKET ConnectSocket,
+    RESULT ReadMemory(
+        SOCKET connectSocket,
         UINT32 processId,
         UINT_PTR address,
         UINT_PTR buffer,
         SIZE_T size)
     {
-        return CopyMem(ConnectSocket, processId, address, currentProcessId, buffer, size);
+        return copy_memory(connectSocket, processId, address, currentProcessId, buffer, size);
     }
 } // namespace Driver
