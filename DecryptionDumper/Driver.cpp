@@ -121,8 +121,8 @@ namespace Driver
         // Assuming you've received the packet fully and correctly
         const auto receivedPacket = reinterpret_cast<Packet*>(receiveBuffer);
 
-        // Check if the packet type is correct
-        if (receivedPacket->header.type != PacketType::packet_completed)
+        // Check if the packet magic and type are correct
+        if (receivedPacket->header.magic != packet_magic || receivedPacket->header.type != PacketType::packet_completed)
         {
             closesocket(connectSocket);
             WSACleanup();
@@ -236,4 +236,35 @@ namespace Driver
     {
         return copy_memory(connectSocket, processId, address, currentProcessId, buffer, size);
     }
+
+    RESULT GetRequiredBufferSizeForProcessList(SOCKET connectSocket)
+    {
+		Packet packet;
+		packet.header.type = PacketType::packet_get_req_plist_buf_size;
+
+		RESULT response;
+        if (!SendPacket(connectSocket, packet, &response))
+        {
+			response = RESULT(STATUS_UNSUCCESSFUL, 0);
+		}
+		RtlSecureZeroMemory(&packet, sizeof(packet));
+		return response;
+	}
+
+    RESULT GetProcessList(SOCKET connectSocket, UINT_PTR address, SIZE_T bufferSize)
+    {
+		Packet packet;
+		packet.header.type = PacketType::packet_get_process_list;
+		packet.data.get_process_list.buffer_address = address;
+		packet.data.get_process_list.buffer_size = bufferSize;
+		packet.data.get_process_list.process_id = currentProcessId;
+
+		RESULT response;
+        if (!SendPacket(connectSocket, packet, &response))
+        {
+			response = RESULT(STATUS_UNSUCCESSFUL, 0);
+		}
+		RtlSecureZeroMemory(&packet, sizeof(packet));
+		return response;
+	}
 } // namespace Driver

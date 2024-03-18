@@ -285,24 +285,115 @@ int main()
         std::cout << make_string("Read PIMAGE_DOS_HEADER and PIMAGE_NT_HEADERS64 successfully") << std::endl;
         Sleep(1000);
 
+        result = Driver::GetRequiredBufferSizeForProcessList(Socket1);
+
+        if (result.status != STATUS_SUCCESS)
+        {
+			std::cout << make_string("Failed to get required buffer size for process list, status: ") << std::hex << result.status << std::dec << std::endl;
+			Sleep(4000);
+			continue;
+		}
+
+        std::cout << make_string("Required buffer size for process list: ") << std::dec << result.value << make_string(" bytes, eqivalent to ") << std::dec << result.value / sizeof(PROCESS_SUMMARY) << make_string(" processes") << std::endl;
+
+        std::vector<UINT8> processListBuffer(result.value);
+
+        result = Driver::GetProcessList(Socket1, reinterpret_cast<UINT_PTR>(processListBuffer.data()), result.value);
+
+        if (result.status != STATUS_SUCCESS)
+        {
+			std::cout << make_string("Failed to get process list, status: ") << std::hex << result.status << std::dec << std::endl;
+			Sleep(4000);
+			continue;
+		}
+
+        std::cout << make_string("Got process list successfully, number of processes: ") << std::dec << result.value << std::endl;
+
+        auto pProcessSummary = reinterpret_cast<PPROCESS_SUMMARY>(processListBuffer.data());
+
+        for (size_t i = 0; i < result.value; i++)
+        {
+            std::cout << make_string("Process ID: ") << pProcessSummary[i].ProcessId << make_string(", Main Module Base: ") << std::hex << pProcessSummary[i].MainModuleBase << std::dec << make_string(", Main Module File Name: ");
+            std::wcout << pProcessSummary[i].MainModuleFileName;
+            std::cout << make_string(", Main Module Image Size: ") << std::dec << pProcessSummary[i].MainModuleImageSize << make_string(" bytes") << make_string(", Main Module Entry Point: ") << std::hex << pProcessSummary[i].MainModuleEntryPoint << std::dec << make_string(", WOW64: ") << (pProcessSummary[i].WOW64 ? make_string("Yes") : make_string("No")) << std::endl;
+		}
+
+        Sleep(2000);
+
         auto pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+        std::vector<std::vector<UINT8>> sectionBuffers;
 
         for (int i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++, pSectionHeader++)
         {
             // Create a buffer for the section
-            std::vector<UINT8> sectionBuffer(pSectionHeader->Misc.VirtualSize);
+            std::vector<UINT8> currentSectionBuffer(pSectionHeader->Misc.VirtualSize);
 
-            // Read the section into the buffer
-            RESULT result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress + pSectionHeader->VirtualAddress, reinterpret_cast<UINT_PTR>(sectionBuffer.data()), pSectionHeader->Misc.VirtualSize);
+            UINT_PTR sectionStart = BaseAddress + pSectionHeader->VirtualAddress;
+            UINT_PTR sectionEnd = sectionStart + pSectionHeader->Misc.VirtualSize;
+            UINT_PTR currentAddress = sectionStart;
+            size_t totalBytesRead = 0;
 
-            if (result.status != STATUS_SUCCESS)
+            while (currentAddress < sectionEnd)
             {
-                std::cout << make_string("Failed to read section ") << pSectionHeader->Name << make_string(", status: ") << std::hex << result.status << std::dec << make_string(", read size: ") << std::dec << result.value << make_string(" bytes") << make_string(", expected size: ") << std::dec << pSectionHeader->Misc.VirtualSize << make_string(" bytes") << std::endl;
+                Sleep(200);
+                UINT_PTR bufferOffset = currentAddress - sectionStart;
+                size_t sizeToRead = sectionEnd - currentAddress;
+
+                // Read the section into the buffer
+                result = Driver::ReadMemory(Socket1, ProcessId, currentAddress, reinterpret_cast<UINT_PTR>(currentSectionBuffer.data()) + bufferOffset, sizeToRead);
+
+                if (result.status == STATUS_SUCCESS)
+                {
+                    // If read was successful, adjust total bytes read and break the loop
+                    totalBytesRead += sizeToRead;
+                    break;
+                }
+                else if (result.status == STATUS_PARTIAL_COPY)
+                {
+                    // On partial copy, adjust the current address and total bytes read based on the amount successfully copied
+                    totalBytesRead += result.value;
+                    currentAddress += result.value;
+
+                    std::cout << make_string("Partial copy encountered in section ") << pSectionHeader->Name << make_string(" at address: ") << std::hex << currentAddress << std::dec << make_string(", read size: ") << std::dec << result.value << make_string(" bytes, expected size: ") << std::dec << sizeToRead << make_string(" bytes") << std::endl;
+                    
+                    // Optionally, skip a small, predefined number of bytes to attempt to bypass inaccessible memory,
+                    // then try reading again from this new address. Adjust this value as necessary.
+                    currentAddress += 1024; // Skipping 1 kb; adjust based on your requirements.
+                }
+                else
+                {
+                    // Handle other errors (optional)
+                    std::cout << make_string("Failed to read section ") << pSectionHeader->Name << make_string(", status: ") << std::hex << result.status << std::dec << make_string(", read size: ") << std::dec << result.value << make_string(" bytes, expected size: ") << std::dec << sizeToRead << make_string(" bytes") << std::endl;
+
+                    break;
+                }
             }
-            
-            pSectionHeader->SizeOfRawData = pSectionHeader->Misc.VirtualSize;
-            pSectionHeader->PointerToRawData = pSectionHeader->VirtualAddress;
+
+            // Add the current section buffer to sectionBuffers
+            sectionBuffers.push_back(std::move(currentSectionBuffer));
+
+            // Update the section header to reflect the actual size of data read
+            pSectionHeader->SizeOfRawData = static_cast<DWORD>(totalBytesRead);
+            pSectionHeader->PointerToRawData = static_cast<DWORD>(sectionStart - BaseAddress);
         }
+
+        std::string dumpFilePath = make_string("dump.bin");
+
+        std::ofstream dumpFile(dumpFilePath, std::ios::out | std::ios::binary);
+        if (!dumpFile.is_open()) {
+            std::cerr << make_string("Failed to open dump file.") << std::endl;
+            return 1;
+        }
+
+        // Write header data
+        dumpFile.write(reinterpret_cast<const char*>(headerBuffer.data()), headerBuffer.size());
+
+        // Write section data
+        for (const auto& sectionBuffer : sectionBuffers) {
+            dumpFile.write(reinterpret_cast<const char*>(sectionBuffer.data()), sectionBuffer.size());
+        }
+
+        dumpFile.close();
     }
 
     std::cout << make_string("Exiting") << std::endl;

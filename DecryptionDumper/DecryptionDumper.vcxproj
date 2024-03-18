@@ -137,7 +137,14 @@
   <ItemGroup>
     <ClInclude Include="Driver.h" />
     <ClInclude Include="no_strings.hpp" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="server_shared.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resource.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="unlock-rounded-padlock-black-security-tool-symbol_icon-icons.com_54442.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

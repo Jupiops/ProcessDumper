@@ -1,5 +1,6 @@
 #pragma once
 #include <iostream>
+#include <vector>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 
@@ -18,6 +19,18 @@ typedef struct _RESULT
     NTSTATUS status;
     SIZE_T value;
 } RESULT, *PRESULT;
+
+#pragma pack(push, 1)
+typedef struct _PROCESS_SUMMARY
+{
+    INT32 ProcessId;
+    PVOID MainModuleBase;
+    WCHAR MainModuleFileName[256];
+    UINT32 MainModuleImageSize;
+    PVOID MainModuleEntryPoint;
+    BOOLEAN WOW64;
+} PROCESS_SUMMARY, * PPROCESS_SUMMARY;
+#pragma pack(pop)
 
 namespace Driver
 {
@@ -40,6 +53,10 @@ namespace Driver
     RESULT GetPebAddress(SOCKET connectSocket, UINT32 processId);
 
     RESULT ReadMemory(SOCKET connectSocket, UINT32 processId, UINT_PTR address, UINT_PTR buffer, SIZE_T size);
+
+    RESULT GetRequiredBufferSizeForProcessList(SOCKET connectSocket);
+
+    RESULT GetProcessList(SOCKET connectSocket, UINT_PTR address, SIZE_T bufferSize);
 
     template <typename T>
     T Read(const SOCKET connectSocket, const UINT32 processId, const UINT64 address)
