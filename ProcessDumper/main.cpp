@@ -7,6 +7,7 @@
 #include <tlhelp32.h>
 #include <vector>
 #include <Windows.h>
+#include <map>
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS 0x00000000
@@ -100,6 +101,55 @@ BOOLEAN UpdateProcessEnvironmentBlockAddress()
     return PebAddress != 0;
 }
 
+int CalculateRealSectionSize(SOCKET socket, int processId, UINT_PTR sectionPointer, const IMAGE_SECTION_HEADER& sectionHeader)
+{
+    UINT_PTR sectionEnd = sectionPointer + sectionHeader.Misc.VirtualSize;
+    int readSize = 100; // The chunk size for reading
+    UINT_PTR currentPointer = sectionEnd;
+    int calculatedSize = 0; // This will hold the calculated size of the real section data
+    std::vector<BYTE> buffer(readSize);
+    bool hasNonZero = false;
+
+    while (currentPointer > sectionPointer)
+    {
+        if (currentPointer - readSize < sectionPointer)
+        {
+            readSize = currentPointer - sectionPointer; // Adjust readSize for the last chunk if necessary
+        }
+
+        currentPointer -= readSize;
+
+        RESULT result = Driver::ReadMemory(socket, processId, currentPointer, reinterpret_cast<UINT_PTR>(buffer.data()), readSize);
+        if (result.status == STATUS_SUCCESS || result.status == STATUS_PARTIAL_COPY)
+        {
+            for (int i = readSize - 1; i >= 0; --i)
+            {
+                if (buffer[i] != 0)
+                {
+                    hasNonZero = true;
+                    // Calculate the size based on the location of the non-zero byte
+                    calculatedSize = currentPointer - sectionPointer + i + 1;
+                    break;
+                }
+            }
+
+            if (hasNonZero)
+            {
+                break; // Exit the loop once non-zero data is found
+            }
+        }
+        else
+        {
+            // Error handling for failed memory read
+            std::cerr << make_string("Error reading process memory: 0x") << std::hex << result.status << std::dec << std::endl;
+            return -1; // Use -1 or another appropriate error code
+        }
+    }
+
+    return hasNonZero ? calculatedSize : 0; // Return the calculated size or 0 if no non-zero data was found
+}
+
+
 int main()
 {
     // Prevent startup if Game is already running
@@ -117,13 +167,13 @@ int main()
 
 
     // Set window title
-    auto title = make_string("Decryptor");
+    auto title = make_string("ProcDump");
     std::wstring wtitle(title.begin(), title.end());
     RtlSecureZeroMemory(&title[0], title.size());
     SetWindowText(GetConsoleWindow(), wtitle.c_str());
     SetConsoleOutputCP(CP_UTF8);
 
-    std::cout << make_string("Starting Decryptor Build ") << make_string(__DATE__) << make_string(" ") << make_string(__TIME__) << std::endl;
+    std::cout << make_string("Starting Process Memory Dumper Build ") << make_string(__DATE__) << make_string(" ") << make_string(__TIME__) << std::endl;
 
     if (!Driver::TestConnection())
     {
@@ -219,13 +269,13 @@ int main()
 
         if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE)
         {
-            std::cout << make_string("Invalid DOS header") << std::endl;
+            std::cout << make_string("Error: Invalid DOS header detected.") << std::endl;
             Sleep(4000);
             continue;
         }
 
         UINT_PTR peHeaderPointer = BaseAddress + dosHeader.e_lfanew;
-        std::cout << make_string("PE Header Found at: 0x") << std::hex << peHeaderPointer << std::dec << std::endl;
+        std::cout << make_string("Valid DOS header found. Proceeding to read the PE header at: 0x") << std::hex << peHeaderPointer << std::dec << std::endl;
         UINT_PTR dosStubPointer = BaseAddress + sizeof(IMAGE_DOS_HEADER);
 
         std::vector<BYTE> dosStubBuffer(dosHeader.e_lfanew - sizeof(IMAGE_DOS_HEADER));
@@ -249,15 +299,20 @@ int main()
 
         if (peHeader.Signature != IMAGE_NT_SIGNATURE)
         {
-            std::cout << make_string("Invalid NT header") << std::endl;
+            std::cout << make_string("Error: Invalid PE header detected.") << std::endl;
             Sleep(4000);
             continue;
         }
 
-        std::cout << make_string("Fetched DOS and NT headers, size of image: ") << peHeader.OptionalHeader.SizeOfImage << make_string(" bytes")
-        << make_string("  = ") << std::dec << peHeader.OptionalHeader.SizeOfImage / static_cast<float>(1024) << make_string(" KB")
-        << make_string("  = ") << std::dec << peHeader.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024) << make_string(" MB")
-        << make_string("  = ") << std::dec << peHeader.OptionalHeader.SizeOfImage / static_cast<float>(1024 * 1024 * 1024) << make_string(" GB") << std::endl;
+        std::cout << make_string("PE Header successfully retrieved. Image Size: ");
+        unsigned long long imageSize = peHeader.OptionalHeader.SizeOfImage; // Store the size in bytes
+        std::cout << imageSize << make_string(" bytes = ");
+
+        // Output in KB, MB, GB with two decimal places
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << static_cast<double>(imageSize) / 1024 << make_string(" KB = ");
+        std::cout << static_cast<double>(imageSize) / (1024 * 1024) << make_string(" MB = ");
+        std::cout << static_cast<double>(imageSize) / (1024 * 1024 * 1024) << make_string(" GB") << std::endl;
 
         UINT_PTR sectionHeaderPointer = peHeaderPointer + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + peHeader.FileHeader.SizeOfOptionalHeader;
         std::cout << make_string("Parsing ") << std::dec << peHeader.FileHeader.NumberOfSections << make_string(" Sections at: 0x") << std::hex << sectionHeaderPointer << std::dec << std::endl;
@@ -275,15 +330,51 @@ int main()
         }
         else
         {
-            std::cout << make_string("Failed to read section headers, status: ") << std::hex << result.status << std::dec << std::endl;
+            std::cout << make_string("Failed to read section headers. Error status: 0x") << std::hex << result.status << std::dec << std::endl;
             Sleep(4000);
             continue;
         }
 
+        // Define a map to store section names and their corresponding data
+        std::map<std::string, std::vector<BYTE>> sectionData;
+
         for (const auto& sectionHeader : sectionHeaders)
         {
-            std::string sectionName(reinterpret_cast<const char*>(sectionHeader.Name), sizeof(sectionHeader.Name));
-            std::cout << make_string("Section: ") + sectionName << " (0x" << std::hex << (BaseAddress + sectionHeader.VirtualAddress) << ")," << make_string(" Size: ") << std::dec << sectionHeader.Misc.VirtualSize << " bytes" << std::endl;
+            std::string sectionName(reinterpret_cast<const char*>(sectionHeader.Name), strnlen(reinterpret_cast<const char*>(sectionHeader.Name), sizeof(sectionHeader.Name)));
+            std::cout << make_string("Processing Section: '") << sectionName << make_string("' at 0x") << std::hex << (BaseAddress + sectionHeader.VirtualAddress) << std::dec << make_string(" with Virtual Size: ") << sectionHeader.Misc.VirtualSize << make_string(" bytes.") << std::endl;
+
+            int realSectionSize = CalculateRealSectionSize(Socket1, ProcessId, BaseAddress + sectionHeader.VirtualAddress, sectionHeader);
+            if (realSectionSize == -1)
+            {
+                std::cout << make_string("Error: Could not calculate the real size for section '") << sectionName << make_string("'.") << std::endl;
+                Sleep(4000);
+                return 0;
+            }
+            else if (realSectionSize == 0)
+            {
+                std::cout << make_string("Notice: Section '") << sectionName << make_string("' is empty and will be skipped.") << std::endl;
+                continue;
+            }
+
+            std::cout << make_string("Confirmed Real Size: ") << realSectionSize << make_string(" bytes for section '") << sectionName << make_string("', which is ") << (sectionHeader.Misc.VirtualSize - realSectionSize) << make_string(" bytes less than the reported virtual size.") << std::endl;
+
+            // Resize the vector in the map for this section
+            sectionData[sectionName].resize(realSectionSize);
+            result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress + sectionHeader.VirtualAddress, reinterpret_cast<UINT_PTR>(sectionData[sectionName].data()), realSectionSize);
+            if (result.status == STATUS_SUCCESS)
+            {
+                std::cout << make_string("Read section content successfully") << std::endl;
+            }
+            else if (result.status == STATUS_PARTIAL_COPY)
+            {
+                std::cout << make_string("Warning: Only partially read section '") << sectionName << make_string("'. Expected: ") << realSectionSize << make_string(" bytes, but got ") << result.value << make_string(" bytes.") << std::endl;
+            }
+            else
+            {
+                std::cout << make_string("Failure: Could not read data from section '") << sectionName << make_string("'. Error status: 0x") << std::hex << result.status << std::dec << make_string(".") << std::endl;
+                Sleep(4000);
+                continue;
+            }
         }
 
     }

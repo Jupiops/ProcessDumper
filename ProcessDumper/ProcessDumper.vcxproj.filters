@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="DecryptionDumper.cpp">
+    <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Driver.cpp">
@@ -26,10 +26,13 @@
     <ClInclude Include="Driver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="server_shared.h">
+    <ClInclude Include="include\no_strings.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="no_strings.hpp">
+    <ClInclude Include="include\lazy_importer.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="server_shared.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">
@@ -42,7 +45,7 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="unlock-rounded-padlock-black-security-tool-symbol_icon-icons.com_54442.ico">
+    <Image Include="dumper-truck.ico">
       <Filter>Resource Files</Filter>
     </Image>
   </ItemGroup>

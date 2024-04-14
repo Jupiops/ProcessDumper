@@ -48,12 +48,12 @@ jobs:
     # New step to rename the files
     - name: Rename files
       run: |
-        Move-Item D:/a/DecryptionDumper/DecryptionDumper/x64/Release/DecryptionDumper.exe D:/a/DecryptionDumper/DecryptionDumper/x64/Release/Decryptor.exe
-        Move-Item D:/a/DecryptionDumper/DecryptionDumper/x64/Release/DecryptionDumper.pdb D:/a/DecryptionDumper/DecryptionDumper/x64/Release/Decryptor.pdb
+        Move-Item D:/a/DecryptionDumper/ProcessDumper/x64/Release/ProcessDumper.exe D:/a/DecryptionDumper/ProcessDumper/x64/Release/ProcDump.exe
+        Move-Item D:/a/DecryptionDumper/ProcessDumper/x64/Release/ProcessDumper.pdb D:/a/DecryptionDumper/ProcessDumper/x64/Release/ProcDump.pdb
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Decryptor
-        path: D:/a/DecryptionDumper/DecryptionDumper/x64/Release/*
+        name: ProcessDumper
+        path: D:/a/DecryptionDumper/ProcessDumper/x64/Release/*
         compression-level: 9

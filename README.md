@@ -1,4 +1,4 @@
-# DecryptionDumper
+# Process Dumper
 
 This is a simple tool to dump the unpacked files from the game
 

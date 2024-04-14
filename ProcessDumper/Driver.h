@@ -4,7 +4,7 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 
-#include "no_strings.hpp"
+#include "include/no_strings.hpp"
 #include "server_shared.h"
 
 // Link with Ws2_32.lib

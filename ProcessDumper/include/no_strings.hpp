@@ -67,13 +67,7 @@ constexpr auto crypt(const char(&input)[N], const uint32_t seed = 0) {
     return blob;
 }
 
-#ifndef NDEBUG
-// Debug build: Define make_string to return the unencrypted string
-#define make_string(STRING) (std::string{STRING})
-#else // !NDEBUG
-// Release build: Define make_string to perform encryption
 #define make_string(STRING) ([&] {                                     \
     constexpr auto _{ crypt(STRING, mlcg::seed(__FILE__, __LINE__)) }; \
     return std::string{ crypt(_.data, _.seed).data };                  \
 }())
-#endif
