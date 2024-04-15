@@ -1,13 +1,20 @@
 #include "Driver.h"
+#include "include/lazy_importer.hpp"
+
+#include <algorithm> // Include for std::copy
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <string>
 #include <limits>
+#include <map>
+#include <string>
 #include <tlhelp32.h>
 #include <vector>
+#define _WINSOCKAPI_    // stops windows.h including winsock.h
 #include <Windows.h>
-#include <map>
+
+#define CHUNK_SIZE 0x400000 // 4 MB
+#define MIN_CHUNK_SIZE 0x80000 // 512 KB
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS 0x00000000
@@ -26,7 +33,7 @@ UINT64 PebAddress = 0;
 
 bool IsProcessRunningStealth(const wchar_t* processName)
 {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    HANDLE hSnapshot = LI_FN(CreateToolhelp32Snapshot).safe()(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE)
     {
         return true; // Error handling or stealth abort
@@ -35,10 +42,10 @@ bool IsProcessRunningStealth(const wchar_t* processName)
     PROCESSENTRY32W pe32; // Note the 'W' at the end for Unicode
     pe32.dwSize = sizeof(PROCESSENTRY32W);
 
-    if (!Process32FirstW(hSnapshot, &pe32))
+    if (!LI_FN(Process32FirstW).safe()(hSnapshot, &pe32))
     {
         // Note the 'W' for Unicode version
-        CloseHandle(hSnapshot);
+        LI_FN(CloseHandle).safe()(hSnapshot);
         return true; // Error handling or stealth abort
     }
 
@@ -47,13 +54,13 @@ bool IsProcessRunningStealth(const wchar_t* processName)
         if (wcscmp(pe32.szExeFile, processName) == 0)
         {
             // Using wcscmp for wide char comparison
-            CloseHandle(hSnapshot);
+            LI_FN(CloseHandle).safe()(hSnapshot);
             return true; // Found the process
         }
     }
-    while (Process32NextW(hSnapshot, &pe32)); // Note the 'W' for Unicode version
+    while (LI_FN(Process32NextW).safe()(hSnapshot, &pe32)); // Note the 'W' for Unicode version
 
-    CloseHandle(hSnapshot);
+    LI_FN(CloseHandle).safe()(hSnapshot);
     return false; // Process not found
 }
 
@@ -149,6 +156,97 @@ int CalculateRealSectionSize(SOCKET socket, int processId, UINT_PTR sectionPoint
     return hasNonZero ? calculatedSize : 0; // Return the calculated size or 0 if no non-zero data was found
 }
 
+void ReadSectionInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, const IMAGE_SECTION_HEADER& sectionHeader, std::vector<BYTE>& sectionData, std::string& sectionName) {
+    UINT_PTR startAddress = baseAddress + sectionHeader.VirtualAddress;
+    UINT_PTR endAddress = startAddress + sectionHeader.Misc.VirtualSize;
+    UINT_PTR currentAddress = startAddress;
+    size_t totalRead = 0;
+    size_t totalSkipped = 0;
+
+    sectionData.resize(sectionHeader.Misc.VirtualSize);
+
+    while (currentAddress < endAddress) {
+        size_t chunkSize = (std::min)(static_cast<size_t>(CHUNK_SIZE), static_cast<size_t>(endAddress - currentAddress));
+        std::vector<BYTE> buffer(chunkSize);
+
+        RESULT result = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(buffer.data()), chunkSize);
+
+        if (result.status == STATUS_SUCCESS || (result.status == STATUS_PARTIAL_COPY && result.value > 0)) {
+            std::copy(buffer.begin(), buffer.begin() + (result.status == STATUS_SUCCESS ? chunkSize : result.value), sectionData.begin() + (currentAddress - startAddress));
+            currentAddress += result.value;
+            totalRead += result.value;
+
+            // Look back on previous failed section if any
+            if (result.value < chunkSize) {
+                UINT_PTR failedAddress = currentAddress;
+                // Reduce chunk size to a smaller value for detailed scanning
+                while (failedAddress > startAddress && failedAddress - MIN_CHUNK_SIZE >= startAddress) {
+                    failedAddress -= MIN_CHUNK_SIZE;
+                    std::vector<BYTE> smallBuffer(MIN_CHUNK_SIZE);
+                    RESULT smallResult = Driver::ReadMemory(socket, processId, failedAddress, reinterpret_cast<UINT_PTR>(smallBuffer.data()), MIN_CHUNK_SIZE);
+                    if (smallResult.status == STATUS_SUCCESS || smallResult.value > 0) {
+                        std::copy(smallBuffer.begin(), smallBuffer.begin() + smallResult.value, sectionData.begin() + (failedAddress - startAddress));
+                        totalRead += smallResult.value;
+                    }
+                }
+            }
+        }
+        else {
+            totalSkipped += chunkSize;
+            currentAddress += chunkSize;
+        }
+        Sleep(10);
+    }
+
+    std::cout << make_string("Read ") << totalRead << make_string(" bytes and skipped ") << totalSkipped << make_string(" bytes for section ") << sectionName << std::endl;
+}
+
+void WriteBinaryData(std::ofstream& file, const void* data, size_t size) {
+    if (data && size > 0) {
+        file.write(reinterpret_cast<const char*>(data), size);
+        if (!file) {
+            std::cerr << make_string("Failed to write data to file.") << std::endl;
+        }
+    }
+}
+
+void WriteMemoryDump(
+    const std::map<std::string, std::vector<BYTE>>& sectionData,
+    const std::string& filename,
+    const IMAGE_DOS_HEADER& dosHeader,
+    const std::vector<BYTE>& dosStubBuffer,
+    const IMAGE_NT_HEADERS64& peHeader,
+    const std::vector<IMAGE_SECTION_HEADER>& sectionHeaders)
+{
+    std::ofstream dumpFile(filename, std::ios::out | std::ios::binary);
+    if (!dumpFile.is_open()) {
+        std::cerr << make_string("Failed to open file for writing: ") << filename << std::endl;
+        return;
+    }
+
+    // Write the DOS header
+    WriteBinaryData(dumpFile, &dosHeader, sizeof(dosHeader));
+
+    // Write the DOS stub (if it exists)
+    WriteBinaryData(dumpFile, dosStubBuffer.data(), dosStubBuffer.size());
+
+    // Write the PE header
+    WriteBinaryData(dumpFile, &peHeader, sizeof(peHeader));
+
+    // Write all section headers
+    for (const auto& header : sectionHeaders) {
+        WriteBinaryData(dumpFile, &header, sizeof(IMAGE_SECTION_HEADER));
+    }
+
+    // Write each section's data
+    for (const auto& section : sectionData) {
+        const std::vector<BYTE>& data = section.second;
+        WriteBinaryData(dumpFile, data.data(), data.size());
+    }
+
+    dumpFile.close();
+    std::cout << make_string("Memory dump with headers has been written to ") << filename << std::endl;
+}
 
 int main()
 {
@@ -358,24 +456,17 @@ int main()
 
             std::cout << make_string("Confirmed Real Size: ") << realSectionSize << make_string(" bytes for section '") << sectionName << make_string("', which is ") << (sectionHeader.Misc.VirtualSize - realSectionSize) << make_string(" bytes less than the reported virtual size.") << std::endl;
 
-            // Resize the vector in the map for this section
-            sectionData[sectionName].resize(realSectionSize);
-            result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress + sectionHeader.VirtualAddress, reinterpret_cast<UINT_PTR>(sectionData[sectionName].data()), realSectionSize);
-            if (result.status == STATUS_SUCCESS)
-            {
-                std::cout << make_string("Read section content successfully") << std::endl;
-            }
-            else if (result.status == STATUS_PARTIAL_COPY)
-            {
-                std::cout << make_string("Warning: Only partially read section '") << sectionName << make_string("'. Expected: ") << realSectionSize << make_string(" bytes, but got ") << result.value << make_string(" bytes.") << std::endl;
-            }
-            else
-            {
-                std::cout << make_string("Failure: Could not read data from section '") << sectionName << make_string("'. Error status: 0x") << std::hex << result.status << std::dec << make_string(".") << std::endl;
-                Sleep(4000);
-                continue;
-            }
+            ReadSectionInChunks(Socket1, ProcessId, BaseAddress, sectionHeader, sectionData[sectionName], sectionName);
+            std::cout << std::endl;
+            Sleep(50);
         }
+
+        // Write the dump to a file
+        std::string filename = make_string("comp_mem_dump.exe");
+        WriteMemoryDump(sectionData, filename, dosHeader, dosStubBuffer, peHeader, sectionHeaders);
+
+        std::cout << make_string("Memory dump has been written to ") << filename << std::endl;
+        Sleep(1000);
 
     }
 
