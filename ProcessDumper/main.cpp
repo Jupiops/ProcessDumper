@@ -13,9 +13,6 @@
 #define _WINSOCKAPI_    // stops windows.h including winsock.h
 #include <Windows.h>
 
-#define CHUNK_SIZE 0x400000 // 4 MB
-#define MIN_CHUNK_SIZE 0x80000 // 512 KB
-
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS 0x00000000
 #endif
@@ -156,44 +153,59 @@ int CalculateRealSectionSize(SOCKET socket, int processId, UINT_PTR sectionPoint
     return hasNonZero ? calculatedSize : 0; // Return the calculated size or 0 if no non-zero data was found
 }
 
+size_t ProbeForward(SOCKET socket, int processId, UINT_PTR currentAddress, size_t probeSize, UINT_PTR endAddress, std::vector<BYTE>& sectionData, UINT_PTR startAddress) {
+    size_t skipped = 0;
+    while (currentAddress < endAddress) {
+        std::vector<BYTE> probeBuffer(probeSize);
+        RESULT probeResult = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(probeBuffer.data()), probeSize);
+        if (probeResult.status == STATUS_SUCCESS || (probeResult.status == STATUS_PARTIAL_COPY && probeResult.value > 0)) {
+            std::copy(probeBuffer.begin(), probeBuffer.begin() + probeResult.value, sectionData.begin() + (currentAddress - startAddress));
+            return skipped; // Return the total skipped bytes up to the point of success
+        } else if (probeResult.status != STATUS_PARTIAL_COPY) {
+            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << probeResult.status << std::dec << std::endl;
+            return skipped; // Return the total skipped bytes if the read failed
+        }
+        currentAddress += probeSize; // Increment address by probe size and continue
+        skipped += probeSize; // Accumulate the total skipped bytes
+    }
+    return skipped; // Return the total skipped bytes if no readable segments were found
+}
+
 void ReadSectionInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, const IMAGE_SECTION_HEADER& sectionHeader, std::vector<BYTE>& sectionData, std::string& sectionName) {
     UINT_PTR startAddress = baseAddress + sectionHeader.VirtualAddress;
     UINT_PTR endAddress = startAddress + sectionHeader.Misc.VirtualSize;
     UINT_PTR currentAddress = startAddress;
+    const size_t CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks
+    const size_t PROBE_SIZE = 64 * 1024;      // Smaller probe size for detailed scanning
     size_t totalRead = 0;
     size_t totalSkipped = 0;
 
     sectionData.resize(sectionHeader.Misc.VirtualSize);
 
     while (currentAddress < endAddress) {
-        size_t chunkSize = (std::min)(static_cast<size_t>(CHUNK_SIZE), static_cast<size_t>(endAddress - currentAddress));
+        size_t chunkSize = (std::min)(CHUNK_SIZE, endAddress - currentAddress);
         std::vector<BYTE> buffer(chunkSize);
 
         RESULT result = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(buffer.data()), chunkSize);
 
-        if (result.status == STATUS_SUCCESS || (result.status == STATUS_PARTIAL_COPY && result.value > 0)) {
-            std::copy(buffer.begin(), buffer.begin() + (result.status == STATUS_SUCCESS ? chunkSize : result.value), sectionData.begin() + (currentAddress - startAddress));
-            currentAddress += result.value;
-            totalRead += result.value;
-
-            // Look back on previous failed section if any
-            if (result.value < chunkSize) {
-                UINT_PTR failedAddress = currentAddress;
-                // Reduce chunk size to a smaller value for detailed scanning
-                while (failedAddress > startAddress && failedAddress - MIN_CHUNK_SIZE >= startAddress) {
-                    failedAddress -= MIN_CHUNK_SIZE;
-                    std::vector<BYTE> smallBuffer(MIN_CHUNK_SIZE);
-                    RESULT smallResult = Driver::ReadMemory(socket, processId, failedAddress, reinterpret_cast<UINT_PTR>(smallBuffer.data()), MIN_CHUNK_SIZE);
-                    if (smallResult.status == STATUS_SUCCESS || smallResult.value > 0) {
-                        std::copy(smallBuffer.begin(), smallBuffer.begin() + smallResult.value, sectionData.begin() + (failedAddress - startAddress));
-                        totalRead += smallResult.value;
-                    }
-                }
-            }
-        }
-        else {
-            totalSkipped += chunkSize;
+        if (result.status == STATUS_SUCCESS) {
+            std::copy(buffer.begin(), buffer.end(), sectionData.begin() + (currentAddress - startAddress));
             currentAddress += chunkSize;
+            totalRead += chunkSize;
+        } else if (result.status == STATUS_PARTIAL_COPY) {
+            if (result.value > 0) {
+                std::copy(buffer.begin(), buffer.begin() + result.value, sectionData.begin() + (currentAddress - startAddress));
+                currentAddress += result.value;
+                totalRead += result.value;
+            } else {
+                size_t skipped = ProbeForward(socket, processId, currentAddress, PROBE_SIZE, endAddress, sectionData, startAddress);
+                totalSkipped += skipped;
+                currentAddress += skipped; // Advance the currentAddress by the amount actually skipped
+            }
+        } else {
+            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << result.status << std::dec << std::endl;
+            totalSkipped += chunkSize;
+            currentAddress += chunkSize; // Skip the entire chunk if completely unreadable
         }
         Sleep(10);
     }
