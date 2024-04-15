@@ -213,6 +213,45 @@ void ReadSectionInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, con
     std::cout << make_string("Read ") << totalRead << make_string(" bytes and skipped ") << totalSkipped << make_string(" bytes for section ") << sectionName << std::endl;
 }
 
+void ReadImageInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, UINT_PTR imageSize, std::vector<BYTE>& imageData) {
+    UINT_PTR currentAddress = baseAddress;
+    const size_t CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks
+    const size_t PROBE_SIZE = 64 * 1024;      // Smaller probe size for detailed scanning
+    size_t totalRead = 0;
+    size_t totalSkipped = 0;
+
+    imageData.resize(imageSize);
+
+    while (currentAddress < baseAddress + imageSize) {
+        size_t chunkSize = (std::min)(CHUNK_SIZE, baseAddress + imageSize - currentAddress);
+        std::vector<BYTE> buffer(chunkSize);
+
+        RESULT result = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(buffer.data()), chunkSize);
+
+        if (result.status == STATUS_SUCCESS) {
+            std::copy(buffer.begin(), buffer.end(), imageData.begin() + (currentAddress - baseAddress));
+            currentAddress += chunkSize;
+            totalRead += chunkSize;
+        } else if (result.status == STATUS_PARTIAL_COPY) {
+            if (result.value > 0) {
+                std::copy(buffer.begin(), buffer.begin() + result.value, imageData.begin() + (currentAddress - baseAddress));
+                currentAddress += result.value;
+                totalRead += result.value;
+            } else {
+                size_t skipped = ProbeForward(socket, processId, currentAddress, PROBE_SIZE, baseAddress + imageSize, imageData, baseAddress);
+                totalSkipped += skipped;
+                currentAddress += skipped; // Advance the currentAddress by the amount actually skipped
+            }
+        } else {
+            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << result.status << std::dec << std::endl;
+            break;
+        }
+        Sleep(10);
+    }
+
+    std::cout << make_string("Read ") << totalRead << make_string(" bytes and skipped ") << totalSkipped << make_string(" bytes for the image") << std::endl;
+}
+
 void WriteBinaryData(std::ofstream& file, const void* data, size_t size) {
     if (data && size > 0) {
         file.write(reinterpret_cast<const char*>(data), size);
@@ -424,6 +463,62 @@ int main()
         std::cout << static_cast<double>(imageSize) / (1024 * 1024) << make_string(" MB = ");
         std::cout << static_cast<double>(imageSize) / (1024 * 1024 * 1024) << make_string(" GB") << std::endl;
 
+        Sleep(3000);
+
+        std::vector<BYTE> processImage(imageSize);
+        ReadImageInChunks(Socket1, ProcessId, BaseAddress, imageSize, processImage);
+
+        result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(processImage.data()), sizeof(IMAGE_DOS_HEADER));
+        if (result.status == STATUS_SUCCESS)
+        {
+			std::cout << make_string("Read DOS header successfully") << std::endl;
+		}
+        else if (result.status == STATUS_PARTIAL_COPY)
+        {
+			std::cout << make_string("Partial copy with size: ") << std::dec << result.value << make_string(" bytes") << std::endl;
+		}
+        else
+        {
+			std::cout << make_string("Failed to read DOS header, status: ") << std::hex << result.status << std::dec << std::endl;
+			Sleep(4000);
+			continue;
+		}
+
+        PIMAGE_DOS_HEADER pNewDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(processImage.data());
+        if (pNewDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+			std::cout << make_string("Error: Invalid DOS header detected in the image.") << std::endl;
+			Sleep(4000);
+			continue;
+		}
+
+        PIMAGE_NT_HEADERS64 pNewPeHeader = reinterpret_cast<PIMAGE_NT_HEADERS64>(processImage.data() + pNewDosHeader->e_lfanew);
+        if (pNewPeHeader->Signature != IMAGE_NT_SIGNATURE) {
+            std::cout << make_string("Error: Invalid PE header detected in the image.") << std::endl;
+            Sleep(4000);
+            continue;
+        }
+
+        std::cout << make_string("Fixing section headers") << std::endl;
+        PIMAGE_SECTION_HEADER pNewSectionHeader = IMAGE_FIRST_SECTION(pNewPeHeader);
+        for (int i = 0; i < pNewPeHeader->FileHeader.NumberOfSections; ++i, ++pNewSectionHeader) {
+			pNewSectionHeader->PointerToRawData = pNewSectionHeader->VirtualAddress;
+			pNewSectionHeader->SizeOfRawData = pNewSectionHeader->Misc.VirtualSize;
+		}
+
+        const std::string filename = make_string("comp_mem_dump.exe");
+        std::ofstream dumpFile(filename, std::ios::out | std::ios::binary);
+        if (!dumpFile.is_open()) {
+            std::cerr << make_string("Failed to open file for writing: ") << filename << std::endl;
+            Sleep(4000);
+            continue;
+        }
+        WriteBinaryData(dumpFile, processImage.data(), processImage.size());
+        dumpFile.close();
+
+        std::cout << make_string("Memory dump has been written to ") << filename << std::endl;
+        
+        
+        /* 
         UINT_PTR sectionHeaderPointer = peHeaderPointer + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + peHeader.FileHeader.SizeOfOptionalHeader;
         std::cout << make_string("Parsing ") << std::dec << peHeader.FileHeader.NumberOfSections << make_string(" Sections at: 0x") << std::hex << sectionHeaderPointer << std::dec << std::endl;
 
@@ -479,6 +574,7 @@ int main()
 
         std::cout << make_string("Memory dump has been written to ") << filename << std::endl;
         Sleep(1000);
+        */
 
     }
 
