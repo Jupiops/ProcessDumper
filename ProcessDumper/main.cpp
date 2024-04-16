@@ -5,8 +5,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <limits>
-#include <map>
 #include <string>
 #include <tlhelp32.h>
 #include <vector>
@@ -105,198 +103,28 @@ BOOLEAN UpdateProcessEnvironmentBlockAddress()
     return PebAddress != 0;
 }
 
-int CalculateRealSectionSize(SOCKET socket, int processId, UINT_PTR sectionPointer, const IMAGE_SECTION_HEADER& sectionHeader)
+void writeMemoryDumpToFile(const std::vector<BYTE>& dataBuffer, const std::string& filePath)
 {
-    UINT_PTR sectionEnd = sectionPointer + sectionHeader.Misc.VirtualSize;
-    int readSize = 100; // The chunk size for reading
-    UINT_PTR currentPointer = sectionEnd;
-    int calculatedSize = 0; // This will hold the calculated size of the real section data
-    std::vector<BYTE> buffer(readSize);
-    bool hasNonZero = false;
-
-    while (currentPointer > sectionPointer)
+    std::ofstream outFile(filePath, std::ios::out | std::ios::binary);
+    if (!outFile)
     {
-        if (currentPointer - readSize < sectionPointer)
-        {
-            readSize = currentPointer - sectionPointer; // Adjust readSize for the last chunk if necessary
-        }
-
-        currentPointer -= readSize;
-
-        RESULT result = Driver::ReadMemory(socket, processId, currentPointer, reinterpret_cast<UINT_PTR>(buffer.data()), readSize);
-        if (result.status == STATUS_SUCCESS || result.status == STATUS_PARTIAL_COPY)
-        {
-            for (int i = readSize - 1; i >= 0; --i)
-            {
-                if (buffer[i] != 0)
-                {
-                    hasNonZero = true;
-                    // Calculate the size based on the location of the non-zero byte
-                    calculatedSize = currentPointer - sectionPointer + i + 1;
-                    break;
-                }
-            }
-
-            if (hasNonZero)
-            {
-                break; // Exit the loop once non-zero data is found
-            }
-        }
-        else
-        {
-            // Error handling for failed memory read
-            std::cerr << make_string("Error reading process memory: 0x") << std::hex << result.status << std::dec << std::endl;
-            return -1; // Use -1 or another appropriate error code
-        }
-    }
-
-    return hasNonZero ? calculatedSize : 0; // Return the calculated size or 0 if no non-zero data was found
-}
-
-size_t ProbeForward(SOCKET socket, int processId, UINT_PTR currentAddress, size_t probeSize, UINT_PTR endAddress, std::vector<BYTE>& sectionData, UINT_PTR startAddress) {
-    size_t skipped = 0;
-    while (currentAddress < endAddress) {
-        std::vector<BYTE> probeBuffer(probeSize);
-        RESULT probeResult = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(probeBuffer.data()), probeSize);
-        if (probeResult.status == STATUS_SUCCESS || (probeResult.status == STATUS_PARTIAL_COPY && probeResult.value > 0)) {
-            std::copy(probeBuffer.begin(), probeBuffer.begin() + probeResult.value, sectionData.begin() + (currentAddress - startAddress));
-            return skipped; // Return the total skipped bytes up to the point of success
-        } else if (probeResult.status != STATUS_PARTIAL_COPY) {
-            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << probeResult.status << std::dec << std::endl;
-            return skipped; // Return the total skipped bytes if the read failed
-        }
-        currentAddress += probeSize; // Increment address by probe size and continue
-        skipped += probeSize; // Accumulate the total skipped bytes
-    }
-    return skipped; // Return the total skipped bytes if no readable segments were found
-}
-
-void ReadSectionInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, const IMAGE_SECTION_HEADER& sectionHeader, std::vector<BYTE>& sectionData, std::string& sectionName) {
-    UINT_PTR startAddress = baseAddress + sectionHeader.VirtualAddress;
-    UINT_PTR endAddress = startAddress + sectionHeader.Misc.VirtualSize;
-    UINT_PTR currentAddress = startAddress;
-    const size_t CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks
-    const size_t PROBE_SIZE = 64 * 1024;      // Smaller probe size for detailed scanning
-    size_t totalRead = 0;
-    size_t totalSkipped = 0;
-
-    sectionData.resize(sectionHeader.Misc.VirtualSize);
-
-    while (currentAddress < endAddress) {
-        size_t chunkSize = (std::min)(CHUNK_SIZE, endAddress - currentAddress);
-        std::vector<BYTE> buffer(chunkSize);
-
-        RESULT result = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(buffer.data()), chunkSize);
-
-        if (result.status == STATUS_SUCCESS) {
-            std::copy(buffer.begin(), buffer.end(), sectionData.begin() + (currentAddress - startAddress));
-            currentAddress += chunkSize;
-            totalRead += chunkSize;
-        } else if (result.status == STATUS_PARTIAL_COPY) {
-            if (result.value > 0) {
-                std::copy(buffer.begin(), buffer.begin() + result.value, sectionData.begin() + (currentAddress - startAddress));
-                currentAddress += result.value;
-                totalRead += result.value;
-            } else {
-                size_t skipped = ProbeForward(socket, processId, currentAddress, PROBE_SIZE, endAddress, sectionData, startAddress);
-                totalSkipped += skipped;
-                currentAddress += skipped; // Advance the currentAddress by the amount actually skipped
-            }
-        } else {
-            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << result.status << std::dec << std::endl;
-            totalSkipped += chunkSize;
-            currentAddress += chunkSize; // Skip the entire chunk if completely unreadable
-        }
-        Sleep(10);
-    }
-
-    std::cout << make_string("Read ") << totalRead << make_string(" bytes and skipped ") << totalSkipped << make_string(" bytes for section ") << sectionName << std::endl;
-}
-
-void ReadImageInChunks(SOCKET socket, int processId, UINT_PTR baseAddress, UINT_PTR imageSize, std::vector<BYTE>& imageData) {
-    UINT_PTR currentAddress = baseAddress;
-    const size_t CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB chunks
-    const size_t PROBE_SIZE = 64 * 1024;      // Smaller probe size for detailed scanning
-    size_t totalRead = 0;
-    size_t totalSkipped = 0;
-
-    imageData.resize(imageSize);
-
-    while (currentAddress < baseAddress + imageSize) {
-        size_t chunkSize = (std::min)(CHUNK_SIZE, baseAddress + imageSize - currentAddress);
-        std::vector<BYTE> buffer(chunkSize);
-
-        RESULT result = Driver::ReadMemory(socket, processId, currentAddress, reinterpret_cast<UINT_PTR>(buffer.data()), chunkSize);
-
-        if (result.status == STATUS_SUCCESS) {
-            std::copy(buffer.begin(), buffer.end(), imageData.begin() + (currentAddress - baseAddress));
-            currentAddress += chunkSize;
-            totalRead += chunkSize;
-        } else if (result.status == STATUS_PARTIAL_COPY) {
-            if (result.value > 0) {
-                std::copy(buffer.begin(), buffer.begin() + result.value, imageData.begin() + (currentAddress - baseAddress));
-                currentAddress += result.value;
-                totalRead += result.value;
-            } else {
-                size_t skipped = ProbeForward(socket, processId, currentAddress, PROBE_SIZE, baseAddress + imageSize, imageData, baseAddress);
-                totalSkipped += skipped;
-                currentAddress += skipped; // Advance the currentAddress by the amount actually skipped
-            }
-        } else {
-            std::cerr << make_string("Error reading memory at address 0x") << std::hex << currentAddress << make_string(" with status code: 0x") << result.status << std::dec << std::endl;
-            break;
-        }
-        Sleep(10);
-    }
-
-    std::cout << make_string("Read ") << totalRead << make_string(" bytes and skipped ") << totalSkipped << make_string(" bytes for the image") << std::endl;
-}
-
-void WriteBinaryData(std::ofstream& file, const void* data, size_t size) {
-    if (data && size > 0) {
-        file.write(reinterpret_cast<const char*>(data), size);
-        if (!file) {
-            std::cerr << make_string("Failed to write data to file.") << std::endl;
-        }
-    }
-}
-
-void WriteMemoryDump(
-    const std::map<std::string, std::vector<BYTE>>& sectionData,
-    const std::string& filename,
-    const IMAGE_DOS_HEADER& dosHeader,
-    const std::vector<BYTE>& dosStubBuffer,
-    const IMAGE_NT_HEADERS64& peHeader,
-    const std::vector<IMAGE_SECTION_HEADER>& sectionHeaders)
-{
-    std::ofstream dumpFile(filename, std::ios::out | std::ios::binary);
-    if (!dumpFile.is_open()) {
-        std::cerr << make_string("Failed to open file for writing: ") << filename << std::endl;
+        std::cerr << make_string("Failed to open file for writing.") << std::endl;
         return;
     }
 
-    // Write the DOS header
-    WriteBinaryData(dumpFile, &dosHeader, sizeof(dosHeader));
+    // Write the entire buffer to the file
+    outFile.write(reinterpret_cast<const char*>(dataBuffer.data()), dataBuffer.size());
 
-    // Write the DOS stub (if it exists)
-    WriteBinaryData(dumpFile, dosStubBuffer.data(), dosStubBuffer.size());
-
-    // Write the PE header
-    WriteBinaryData(dumpFile, &peHeader, sizeof(peHeader));
-
-    // Write all section headers
-    for (const auto& header : sectionHeaders) {
-        WriteBinaryData(dumpFile, &header, sizeof(IMAGE_SECTION_HEADER));
+    if (outFile.bad())
+    {
+        std::cerr << make_string("Error occurred during file write.") << std::endl;
+    }
+    else
+    {
+        std::cout << make_string("Dump successfully written to file.") << std::endl;
     }
 
-    // Write each section's data
-    for (const auto& section : sectionData) {
-        const std::vector<BYTE>& data = section.second;
-        WriteBinaryData(dumpFile, data.data(), data.size());
-    }
-
-    dumpFile.close();
-    std::cout << make_string("Memory dump with headers has been written to ") << filename << std::endl;
+    outFile.close(); // Close the file
 }
 
 int main()
@@ -443,7 +271,7 @@ int main()
             Sleep(4000);
             continue;
         }
-        
+
         auto peHeader = Driver::Read<IMAGE_NT_HEADERS64>(Socket1, ProcessId, peHeaderPointer);
 
         if (peHeader.Signature != IMAGE_NT_SIGNATURE)
@@ -454,7 +282,7 @@ int main()
         }
 
         std::cout << make_string("PE Header successfully retrieved. Image Size: ");
-        unsigned long long imageSize = peHeader.OptionalHeader.SizeOfImage; // Store the size in bytes
+        UINT_PTR imageSize = peHeader.OptionalHeader.SizeOfImage; // Store the size in bytes
         std::cout << imageSize << make_string(" bytes = ");
 
         // Output in KB, MB, GB with two decimal places
@@ -463,62 +291,6 @@ int main()
         std::cout << static_cast<double>(imageSize) / (1024 * 1024) << make_string(" MB = ");
         std::cout << static_cast<double>(imageSize) / (1024 * 1024 * 1024) << make_string(" GB") << std::endl;
 
-        Sleep(3000);
-
-        std::vector<BYTE> processImage(imageSize);
-        ReadImageInChunks(Socket1, ProcessId, BaseAddress, imageSize, processImage);
-
-        result = Driver::ReadMemory(Socket1, ProcessId, BaseAddress, reinterpret_cast<UINT_PTR>(processImage.data()), sizeof(IMAGE_DOS_HEADER));
-        if (result.status == STATUS_SUCCESS)
-        {
-			std::cout << make_string("Read DOS header successfully") << std::endl;
-		}
-        else if (result.status == STATUS_PARTIAL_COPY)
-        {
-			std::cout << make_string("Partial copy with size: ") << std::dec << result.value << make_string(" bytes") << std::endl;
-		}
-        else
-        {
-			std::cout << make_string("Failed to read DOS header, status: ") << std::hex << result.status << std::dec << std::endl;
-			Sleep(4000);
-			continue;
-		}
-
-        PIMAGE_DOS_HEADER pNewDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(processImage.data());
-        if (pNewDosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-			std::cout << make_string("Error: Invalid DOS header detected in the image.") << std::endl;
-			Sleep(4000);
-			continue;
-		}
-
-        PIMAGE_NT_HEADERS64 pNewPeHeader = reinterpret_cast<PIMAGE_NT_HEADERS64>(processImage.data() + pNewDosHeader->e_lfanew);
-        if (pNewPeHeader->Signature != IMAGE_NT_SIGNATURE) {
-            std::cout << make_string("Error: Invalid PE header detected in the image.") << std::endl;
-            Sleep(4000);
-            continue;
-        }
-
-        std::cout << make_string("Fixing section headers") << std::endl;
-        PIMAGE_SECTION_HEADER pNewSectionHeader = IMAGE_FIRST_SECTION(pNewPeHeader);
-        for (int i = 0; i < pNewPeHeader->FileHeader.NumberOfSections; ++i, ++pNewSectionHeader) {
-			pNewSectionHeader->PointerToRawData = pNewSectionHeader->VirtualAddress;
-			pNewSectionHeader->SizeOfRawData = pNewSectionHeader->Misc.VirtualSize;
-		}
-
-        const std::string filename = make_string("comp_mem_dump.exe");
-        std::ofstream dumpFile(filename, std::ios::out | std::ios::binary);
-        if (!dumpFile.is_open()) {
-            std::cerr << make_string("Failed to open file for writing: ") << filename << std::endl;
-            Sleep(4000);
-            continue;
-        }
-        WriteBinaryData(dumpFile, processImage.data(), processImage.size());
-        dumpFile.close();
-
-        std::cout << make_string("Memory dump has been written to ") << filename << std::endl;
-        
-        
-        /* 
         UINT_PTR sectionHeaderPointer = peHeaderPointer + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + peHeader.FileHeader.SizeOfOptionalHeader;
         std::cout << make_string("Parsing ") << std::dec << peHeader.FileHeader.NumberOfSections << make_string(" Sections at: 0x") << std::hex << sectionHeaderPointer << std::dec << std::endl;
 
@@ -540,42 +312,85 @@ int main()
             continue;
         }
 
-        // Define a map to store section names and their corresponding data
-        std::map<std::string, std::vector<BYTE>> sectionData;
+        // Allocate a buffer to hold the entire image
+        std::vector<BYTE> fullImageBuffer(imageSize);
 
-        for (const auto& sectionHeader : sectionHeaders)
-        {
-            std::string sectionName(reinterpret_cast<const char*>(sectionHeader.Name), strnlen(reinterpret_cast<const char*>(sectionHeader.Name), sizeof(sectionHeader.Name)));
-            std::cout << make_string("Processing Section: '") << sectionName << make_string("' at 0x") << std::hex << (BaseAddress + sectionHeader.VirtualAddress) << std::dec << make_string(" with Virtual Size: ") << sectionHeader.Misc.VirtualSize << make_string(" bytes.") << std::endl;
+        Sleep(3000);
 
-            int realSectionSize = CalculateRealSectionSize(Socket1, ProcessId, BaseAddress + sectionHeader.VirtualAddress, sectionHeader);
-            if (realSectionSize == -1)
-            {
-                std::cout << make_string("Error: Could not calculate the real size for section '") << sectionName << make_string("'.") << std::endl;
-                Sleep(4000);
-                return 0;
-            }
-            else if (realSectionSize == 0)
-            {
-                std::cout << make_string("Notice: Section '") << sectionName << make_string("' is empty and will be skipped.") << std::endl;
-                continue;
-            }
+        std::copy(reinterpret_cast<const char*>(&dosHeader), reinterpret_cast<const char*>(&dosHeader) + sizeof(IMAGE_DOS_HEADER), fullImageBuffer.begin());
+        std::copy(dosStubBuffer.begin(), dosStubBuffer.end(), fullImageBuffer.begin() + sizeof(IMAGE_DOS_HEADER));
+        std::copy(reinterpret_cast<const char*>(&peHeader), reinterpret_cast<const char*>(&peHeader) + sizeof(IMAGE_NT_HEADERS64), fullImageBuffer.begin() + dosHeader.e_lfanew);
 
-            std::cout << make_string("Confirmed Real Size: ") << realSectionSize << make_string(" bytes for section '") << sectionName << make_string("', which is ") << (sectionHeader.Misc.VirtualSize - realSectionSize) << make_string(" bytes less than the reported virtual size.") << std::endl;
+        // Calculate the correct offset in the buffer
+        size_t offset = sectionHeaderPointer - BaseAddress;
 
-            ReadSectionInChunks(Socket1, ProcessId, BaseAddress, sectionHeader, sectionData[sectionName], sectionName);
-            std::cout << std::endl;
-            Sleep(50);
+        // Ensure the offset is within the buffer's capacity to prevent overflow
+        if (offset + sectionHeaders.size() * sizeof(IMAGE_SECTION_HEADER) <= fullImageBuffer.size()) {
+            auto dest = reinterpret_cast<char*>(fullImageBuffer.data() + offset);
+            std::copy(reinterpret_cast<const char*>(sectionHeaders.data()), reinterpret_cast<const char*>(sectionHeaders.data()) + sectionHeaders.size() * sizeof(IMAGE_SECTION_HEADER), dest);
+        } else {
+            std::cerr << make_string("Error: Buffer overflow prevented while trying to copy section headers.") << std::endl;
         }
 
-        // Write the dump to a file
-        std::string filename = make_string("comp_mem_dump.exe");
-        WriteMemoryDump(sectionData, filename, dosHeader, dosStubBuffer, peHeader, sectionHeaders);
+        const size_t chunkSize = 4 * 1024 * 1024; // 4 MB per chunk
+        size_t bytesRead = sizeof(IMAGE_DOS_HEADER) + dosStubBuffer.size() + sizeof(IMAGE_NT_HEADERS64);
+        size_t totalSkippedBytes = 0; // Counter for skipped bytes
 
-        std::cout << make_string("Memory dump has been written to ") << filename << std::endl;
+        while (bytesRead < imageSize) {
+            size_t toRead = (std::min)(chunkSize, imageSize - bytesRead);
+            RESULT chunkResult = Driver::ReadMemory(Socket1, ProcessId, BaseAddress + bytesRead, reinterpret_cast<UINT_PTR>(fullImageBuffer.data() + bytesRead), toRead);
+
+            if (chunkResult.status == STATUS_SUCCESS || (chunkResult.status == STATUS_PARTIAL_COPY && chunkResult.value > 0)) {
+                bytesRead += chunkResult.value;
+
+                if (chunkResult.status == STATUS_PARTIAL_COPY) {
+                    // Adjust the read to continue from where the partial copy stopped
+                    continue;
+                }
+            } else if (chunkResult.status == STATUS_PARTIAL_COPY && chunkResult.value == 0) {
+                // Handle the case where the start of the chunk is unreadable
+                // Try smaller chunks or skip a small region before attempting another large read
+                const size_t skipSize = 1024; // Skip 1 KB and try again
+                bytesRead += skipSize; // Adjust bytesRead to skip over the unreadable area
+                totalSkippedBytes += skipSize; // Track the skipped bytes
+            } else {
+                std::cout << make_string("Failed to read memory, status: ") << std::hex << chunkResult.status << std::dec << std::endl;
+                break;
+            }
+            Sleep(10); // Sleep for a short time to avoid flooding the driver
+        }
+
+        std::cout << make_string("Total Skipped Bytes: ") << totalSkippedBytes << make_string(" bytes.") << std::endl;
+
         Sleep(1000);
-        */
 
+        auto pNewDosHeader = reinterpret_cast<PIMAGE_DOS_HEADER>(fullImageBuffer.data());
+        if (pNewDosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+        {
+            std::cout << make_string("Error: Invalid DOS header detected in the image.") << std::endl;
+            Sleep(4000);
+            continue;
+        }
+
+        auto pNewPeHeader = reinterpret_cast<PIMAGE_NT_HEADERS64>(fullImageBuffer.data() + pNewDosHeader->e_lfanew);
+        if (pNewPeHeader->Signature != IMAGE_NT_SIGNATURE)
+        {
+            std::cout << make_string("Error: Invalid PE header detected in the image.") << std::endl;
+            Sleep(4000);
+            continue;
+        }
+
+        std::cout << make_string("Fixing section headers") << std::endl;
+        auto pNewSectionHeader = IMAGE_FIRST_SECTION(pNewPeHeader);
+        for (int i = 0; i < pNewPeHeader->FileHeader.NumberOfSections; ++i, ++pNewSectionHeader)
+        {
+            pNewSectionHeader->PointerToRawData = pNewSectionHeader->VirtualAddress;
+            pNewSectionHeader->SizeOfRawData = pNewSectionHeader->Misc.VirtualSize;
+        }
+
+        // After all read operations are done and buffer is filled
+        std::string outputFilePath = make_string("dumped_image.exe");
+        writeMemoryDumpToFile(fullImageBuffer, outputFilePath);
     }
 
     std::cout << make_string("Exiting") << std::endl;
