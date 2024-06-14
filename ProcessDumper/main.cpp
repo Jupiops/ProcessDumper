@@ -141,7 +141,7 @@ std::string generateOutputFilePath(const std::wstring& processName) {
     }
 
     // Create file path
-    return processNameStr + "_dump_" + timeStr + ".exe";
+    return processNameStr + make_string("_dump_") + timeStr + make_string(".exe");
 }
 
 int main() {
